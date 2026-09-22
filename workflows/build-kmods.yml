@@ -1,7 +1,7 @@
-name: Build All ophub kmods
+name: Build ophub kmods from ImmortalWrt definitions
 
 on:
-  workflow_dispatch:  # 允许你在 GitHub 界面上手动点击运行
+  workflow_dispatch:
 
 jobs:
   build:
@@ -10,25 +10,71 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Compile all kmods for ophub kernel
-        uses: ophub/amlogic-s9xxx-armbian@main
-        with:
-          build_target: kernel
-          # 这里必须和你当前内核的大版本严格对应
-          # 你的系统是 6.18.52-ophub，所以这里填 6.18.y
-          kernel_version: 6.18.y
-          # 保持签名 -ophub，确保包能被你的系统接受
-          kernel_sign: -ophub
-          # 关键：传入配置来启用所有 kmod
-          # ophub 的内核配置中，CONFIG_ALL_KMODS 可能无效
-          # 更可靠的方式是直接传入一个自定义配置片段
-          kernel_config: kernel-config/all-kmods
-          # 自动应用配置
-          auto_patch: true
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-distutils rsync unzip zlib1g-dev file wget
 
-      - name: Upload kmods artifact
+      # 第一步：用 ophub 的编译脚本产出内核配置和 .ko 文件
+      - name: Compile ophub kernel with CIFS enabled
+        run: |
+          git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-armbian.git
+          cd amlogic-s9xxx-armbian
+          # 创建配置目录，启用 CIFS
+          mkdir -p compile-kernel/tools/config
+          echo "CONFIG_CIFS=m" >> compile-kernel/tools/config/config
+          echo "CONFIG_CIFS_SMB_DIRECT=m" >> compile-kernel/tools/config/config
+          echo "CONFIG_CIFS_UPCALL=m" >> compile-kernel/tools/config/config
+          echo "CONFIG_CIFS_XATTR=y" >> compile-kernel/tools/config/config
+          echo "CONFIG_NLS_UTF8=m" >> compile-kernel/tools/config/config
+          # 编译内核，签名保持 -ophub
+          sudo ./recompile -k 6.18.y -n -ophub -m modules
+          
+          # 收集内核构建目录（包含 .ko 和内核配置）
+          KERNEL_BUILD_DIR=$(find /opt/kernel/compile-kernel/output -name "*.tar.gz" | head -1)
+          mkdir -p /tmp/ophub-kernel
+          tar -xzf "$KERNEL_BUILD_DIR" -C /tmp/ophub-kernel
+
+      # 第二步：克隆 ImmortalWrt 源码，获取 kmod 包定义
+      - name: Clone ImmortalWrt for kmod definitions
+        run: |
+          git clone --depth 1 --branch v25.12.1 https://github.com/immortalwrt/immortalwrt.git /tmp/immortalwrt
+          cd /tmp/immortalwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # 第三步：用 ImmortalWrt 的 KernelPackage 定义 + ophub 的内核产物生成 apk
+      - name: Build kmod apks using ImmortalWrt package definitions
+        run: |
+          cd /tmp/immortalwrt
+          # 配置目标平台
+          echo "CONFIG_TARGET_armsr=y" >> .config
+          echo "CONFIG_TARGET_armsr_armv8=y" >> .config
+          echo "CONFIG_TARGET_armsr_armv8_DEVICE_generic=y" >> .config
+          # 覆盖内核相关变量，指向 ophub 的构建产物
+          export LINUX_DIR=/tmp/ophub-kernel
+          export KERNEL_BUILD_DIR=/tmp/ophub-kernel
+          # 选择需要的 kmod
+          echo "CONFIG_PACKAGE_kmod-fs-cifs=m" >> .config
+          echo "CONFIG_PACKAGE_kmod-nls-utf8=m" >> .config
+          # 用 ALL_KMODS 尝试全量（可能失败，先保留 CIFS）
+          # echo "CONFIG_ALL_KMODS=y" >> .config
+          make defconfig
+          # 只编译内核模块包
+          make -j$(nproc) package/kernel/linux/compile V=s
+
+      - name: Collect apk packages
+        run: |
+          mkdir -p output
+          find /tmp/immortalwrt/bin -name "kmod-*.apk" -exec cp {} output/ \;
+          find /tmp/immortalwrt/bin -name "packages.adb" -exec cp {} output/ \;
+          ls -la output/
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ophub-6.18-all-kmods
-          path: output/**/*.apk
+          name: ophub-kmods
+          path: output/
           if-no-files-found: warn
