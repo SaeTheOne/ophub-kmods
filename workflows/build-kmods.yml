@@ -1,0 +1,34 @@
+name: Build All ophub kmods
+
+on:
+  workflow_dispatch:  # 允许你在 GitHub 界面上手动点击运行
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile all kmods for ophub kernel
+        uses: ophub/amlogic-s9xxx-armbian@main
+        with:
+          build_target: kernel
+          # 这里必须和你当前内核的大版本严格对应
+          # 你的系统是 6.18.52-ophub，所以这里填 6.18.y
+          kernel_version: 6.18.y
+          # 保持签名 -ophub，确保包能被你的系统接受
+          kernel_sign: -ophub
+          # 关键：传入配置来启用所有 kmod
+          # ophub 的内核配置中，CONFIG_ALL_KMODS 可能无效
+          # 更可靠的方式是直接传入一个自定义配置片段
+          kernel_config: kernel-config/all-kmods
+          # 自动应用配置
+          auto_patch: true
+
+      - name: Upload kmods artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ophub-6.18-all-kmods
+          path: output/**/*.apk
+          if-no-files-found: warn
